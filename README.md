@@ -73,8 +73,12 @@ or `npx serve .`
 
 ### Deploy to GitHub Pages
 
-Push the repo, then in **Settings → Pages** set the source to the `main` branch
-and the `/demo` folder. Pages will serve the demo at
+GitHub Pages can only publish from `/ (root)` or `/docs`, not an arbitrary
+folder, so this repo ships a workflow (`.github/workflows/pages.yml`) that
+publishes the `demo/` directory via GitHub Actions.
+
+In **Settings → Pages**, set **Source** to **GitHub Actions** (not "Deploy from
+a branch"). The workflow runs on every push to `main` and serves the demo at
 `https://<user>.github.io/<repo>/`.
 
 ### Local Flask dev server (full project)
