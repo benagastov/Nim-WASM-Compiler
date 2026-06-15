@@ -42,6 +42,8 @@
 <div class="row">
   <button id="btnRun" disabled>Build &amp; Run</button>
   <button id="btnRunOnly" disabled title="Re-run the last build without recompiling">Run Only</button>
+  <button id="btnDownload" disabled title="Download the compiled app.wasm">Download .wasm</button>
+  <button id="btnStandalone" disabled title="Download a single self-contained .html that runs app.wasm anywhere">Download standalone .html</button>
   <span id="status" class="pill idle">loading…</span>
   <span id="tm" style="color:#8b949e;font-size:12px;"></span>
 </div>
@@ -118,7 +120,7 @@ tick();
   await new Promise(r => setTimeout(r, 200));
   setStatus('loading clang.js…', 'busy');
   logInfo('[init] nim ready, loading clang.js…');
-  const clangModule = await import('./static/clang/clang.js?v=37');
+  const clangModule = await import('./static/clang/clang.js?v=36');
   window.clangModule = clangModule;
   const CLANG_DIST = new URL('static/clang', window.location.href).href.replace(/\/$/, '');
   await clangModule.init({ path: CLANG_DIST });
@@ -267,12 +269,10 @@ btn.addEventListener('click', async () => {
   }
 
   let clangRc = 0;
-  let buildOk = false;
   try {
     const result = await window.clangModule.compileEachLink(cFilesData, 'app.wasm');
     await waitForQuiet();
     logInfo('[clang] result: ' + JSON.stringify(result));
-    buildOk = !!(result && result.ok);
   } catch (e) {
     logStderr('[clang] failed: ' + (e.name||'?') + ' errno=' + (e.errno||'?') + ' msg=' + (e.message||'?'));
     if (e.stack) logStderr(e.stack.slice(0, 500));
@@ -301,7 +301,12 @@ btn.addEventListener('click', async () => {
     setStatus(`done in ${total}s`, 'ok');
   }
   btn.disabled = false;
-  if (buildOk) $('btnRunOnly').disabled = false;
+  if (clangRc === 0) {
+    // Build resolved without throwing → app.wasm is in the worker's memfs.
+    $('btnRunOnly').disabled = false;
+    $('btnDownload').disabled = false;
+    $('btnStandalone').disabled = false;
+  }
 });
 
 // ── Run Only ──────────────────────────────────────────────────────────────
@@ -310,7 +315,13 @@ btn.addEventListener('click', async () => {
 // run its _start again. Enabled only after a successful build; editing the
 // source disables it so you never silently re-run stale output.
 const btnRunOnly = $('btnRunOnly');
-codeEl.addEventListener('input', () => { btnRunOnly.disabled = true; });
+const btnDownload = $('btnDownload');
+const btnStandalone = $('btnStandalone');
+codeEl.addEventListener('input', () => {
+  btnRunOnly.disabled = true;
+  btnDownload.disabled = true;
+  btnStandalone.disabled = true;
+});
 
 btnRunOnly.addEventListener('click', async () => {
   btnRunOnly.disabled = true;
@@ -358,6 +369,74 @@ btnRunOnly.addEventListener('click', async () => {
   setStatus(ok ? `ran in ${total}s` : `run finished in ${total}s`, ok ? 'ok' : 'idle');
   btn.disabled = false;
   btnRunOnly.disabled = false;
+});
+
+// ── Download .wasm ────────────────────────────────────────────────────────
+// Pull the compiled app.wasm bytes out of the worker's memfs and save them.
+// The result is a standalone WASI module — runnable in any WASI runtime
+// (e.g. `wasmtime app.wasm`) as well as this page.
+btnDownload.addEventListener('click', async () => {
+  try {
+    const r = await window.clangModule.getFile('app.wasm');
+    if (!r || !r.ok) {
+      logStderr('[download] ' + ((r && r.error) || 'no build available'));
+      return;
+    }
+    const blob = new Blob([r.bytes], { type: 'application/wasm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'app.wasm';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    logInfo('[download] app.wasm (' + r.bytes.length + ' bytes)');
+  } catch (e) {
+    logStderr('[download] failed: ' + (e.message || e));
+  }
+});
+
+// ── Download standalone .html ─────────────────────────────────────────────
+// Inline app.wasm (base64) into a self-contained runner page with a built-in
+// WASI shim. The result is one .html file that runs the program and shows its
+// output on any static host or offline — no server, no toolchain, no clang.js.
+function bytesToB64(u8) {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+
+btnStandalone.addEventListener('click', async () => {
+  try {
+    const r = await window.clangModule.getFile('app.wasm');
+    if (!r || !r.ok) {
+      logStderr('[standalone] ' + ((r && r.error) || 'no build available'));
+      return;
+    }
+    const resp = await fetch('static/standalone-template.html?v=2');
+    if (!resp.ok) {
+      logStderr('[standalone] template fetch failed: ' + resp.status);
+      return;
+    }
+    const tmpl = await resp.text();
+    const html = tmpl.replace('__WASM_B64__', bytesToB64(r.bytes));
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'app-standalone.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    logInfo('[standalone] app-standalone.html (' + html.length + ' bytes, wasm ' + r.bytes.length + ' B)');
+  } catch (e) {
+    logStderr('[standalone] failed: ' + (e.message || e));
+  }
 });
 </script>
 </body>
