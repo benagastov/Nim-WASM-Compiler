@@ -1,0 +1,365 @@
+<!-- v34 nim-wasm-pipeline: compileEachLink in patched clang.js (clang -cc1 -emit-obj now passes -fno-common to avoid an LLVM-8 WasmObjectWriter trap on common-linkage/tentative-definition globals). HEADER adds a weak raise() stub (wasi-libc declares but does not implement it) and the C-source cleaner rewrites Nim 3-arg main(argc,args,env) to the 2-arg main(argc,argv) that crt1.o calls. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nim → Wasm in your browser</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 20px auto; padding: 0 20px; background: #0e1116; color: #e6edf3; }
+  h1 { color: #f0883e; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 14px; margin-bottom: 16px; }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .row { display: flex; gap: 12px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .pill { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .pill.busy { background: #f0883e; color: #000; }
+  .pill.ok { background: #3fb950; color: #000; }
+  .pill.err { background: #f85149; color: #fff; }
+  .pill.idle { background: #21262d; color: #8b949e; }
+  textarea { width: 100%; height: 220px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-family: ui-monospace, monospace; font-size: 13px; box-sizing: border-box; resize: vertical; }
+  button { padding: 10px 20px; background: #238636; color: #fff; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
+  button:hover:not(:disabled) { background: #2ea043; }
+  #status { margin-left: 10px; font-weight: 600; }
+  pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; max-height: 400px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+  .out-stdout { color: #e6edf3; }
+  .out-stderr { color: #f85149; }
+  .out-info { color: #58a6ff; }
+  .out-ok { color: #3fb950; }
+  .step { color: #f0883e; font-weight: 700; }
+  .footer { color: #8b949e; font-size: 12px; margin-top: 24px; padding-top: 12px; border-top: 1px solid #21262d; }
+</style>
+</head>
+<body>
+<h1>Nim → Wasm, in your browser</h1>
+<div class="sub">
+  A real Nim 2.2.4 compiler (compiled to WebAssembly) running in your browser.
+  It compiles your Nim code to C, then <code>clang.js</code> (compiled to wasm)
+  turns each C file into a wasm object and links them into a final wasm, which runs.
+  Click <b>Build &amp; Run</b> to try it.
+  &middot; <a href="/">home</a> &middot; <a href="/nim">show nim compiler</a>
+</div>
+
+<div class="row">
+  <button id="btnRun" disabled>Build &amp; Run</button>
+  <button id="btnRunOnly" disabled title="Re-run the last build without recompiling">Run Only</button>
+  <span id="status" class="pill idle">loading…</span>
+  <span id="tm" style="color:#8b949e;font-size:12px;"></span>
+</div>
+
+<h3 style="color:#f0883e;margin-top:24px;">Your Nim code</h3>
+<textarea id="code" spellcheck="false">import strformat, algorithm
+
+let name = "browser"
+echo "Hello, ", name, "!"
+
+for i in 0..4:
+  echo &"i = {i}"
+
+let xs = @[3, 1, 4, 1, 5, 9, 2, 6]
+echo "sorted: ", xs.sorted
+
+proc factorial(n: int): int =
+  if n <= 1: 1 else: n * factorial(n-1)
+echo "5! = ", factorial(5)
+</textarea>
+
+<h3 style="color:#f0883e;margin-top:20px;">Output</h3>
+<pre id="outBox"><span class="out-info">[waiting for Build &amp; Run…]</span></pre>
+
+<div class="footer">
+  <b>How it works (3 stages, all in the browser):</b>
+  <ol style="margin:6px 0;">
+    <li><b>nim compiler (wasm)</b> &mdash; compiles your Nim to C (gcc step fails by design; the .c files are what we need).</li>
+    <li><b>clang.js (wasm)</b> &mdash; for each .c file, runs <code>clang.wasm</code> to produce a .o. Then <code>lld.wasm</code> links all .o files into a single wasm and runs it.</li>
+  </ol>
+  <b>Payload:</b> ~70 MB total, lazy-loaded.
+</div>
+
+<script src="/static/nim/nim-bundle.js?v=33"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const codeEl = $('code');
+const outBox = $('outBox');
+const btn = $('btnRun');
+const tm = $('tm');
+
+function setStatus(text, cls) {
+  const s = $('status');
+  s.textContent = text;
+  s.className = 'pill ' + (cls || 'idle');
+}
+
+function log(html, cls) {
+  const span = document.createElement('span');
+  span.className = cls || 'out-info';
+  span.textContent = html + '\n';
+  outBox.appendChild(span);
+  outBox.scrollTop = outBox.scrollHeight;
+}
+
+function logStdout(t)  { log(t, 'out-stdout'); }
+function logStderr(t)  { log(t, 'out-stderr'); }
+function logInfo(t)    { log(t, 'out-info'); }
+function logOk(t)      { log(t, 'out-ok'); }
+function logStep(t)    { log(t, 'step'); }
+
+const t0 = performance.now();
+function tick() {
+  tm.textContent = ((performance.now() - t0) / 1000).toFixed(1) + 's';
+  requestAnimationFrame(tick);
+}
+tick();
+
+(async function init() {
+  setStatus('loading nim compiler…', 'busy');
+  while (typeof FS === 'undefined' || typeof callMain === 'undefined') {
+    await new Promise(r => setTimeout(r, 50));
+  }
+  await new Promise(r => setTimeout(r, 200));
+  setStatus('loading clang.js…', 'busy');
+  logInfo('[init] nim ready, loading clang.js…');
+  const clangModule = await import('/static/clang/clang.js?v=37');
+  window.clangModule = clangModule;
+  const CLANG_DIST = new URL('/static/clang', window.location.href).href.replace(/\/$/, '');
+  await clangModule.init({ path: CLANG_DIST });
+  setStatus('ready — click Build & Run', 'ok');
+  btn.disabled = false;
+})();
+
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  outBox.innerHTML = '';
+  setStatus('compiling…', 'busy');
+  const tStart = performance.now();
+
+  logStep('═══ STEP 1: Compile Nim → C (via wasm-nim) ═══');
+  let nimRc = 0;
+  try {
+    let stdoutBuf = '', stderrBuf = '';
+    const origPrint = window.print;
+    const origErr = window.printErr;
+    window.print = (t) => { stdoutBuf += t + '\n'; };
+    window.printErr = (t) => { stderrBuf += t + '\n'; };
+
+    const userCode = codeEl.value;
+    globalThis.__NIM_USER_CODE__ = userCode;
+    globalThis.__NIM_USER_CODE_PENDING__ = userCode;
+    globalThis.__NIM_USER_PATH__ = '/tmp/user.nim';
+    globalThis.__NIM_USER_CODE_WRITTEN__ = false;
+    // Use C backend: produces .c files that compile cleanly with -x c++ in
+    // clang.js without needing C++ exceptions. The cpp backend emits
+    // `try`/`throw` which the wasm-clang sysroot cannot handle even with
+    // -fexceptions (it builds wasm-clang without exception support).
+    const nimArgs = ['c', '--hints:off', '-d:release', '-d:useMalloc',
+                     '--path:/lib/pure', '--path:/lib/pure/collections', '--path:/lib/core',
+                     '-o:/tmp/user', '/tmp/user.nim'];
+    nimRc = window.callMain(nimArgs);
+
+    if (stdoutBuf.trim()) stdoutBuf.trim().split('\n').forEach(l => l && logStdout(l));
+    if (stderrBuf.trim()) stderrBuf.trim().split('\n').forEach(l => l && logStderr(l));
+    window.print = origPrint;
+    window.printErr = origErr;
+  } catch (e) {
+    logStderr('[build] callMain threw: ' + (e.message || e));
+    nimRc = -1;
+  }
+  const dt1 = ((performance.now() - tStart) / 1000).toFixed(2);
+  logInfo(`[nim] returned ${nimRc} in ${dt1}s (gcc failure expected; .c files should be in MEMFS)`);
+
+  logStep('═══ STEP 1b: Collect C/C++ files from nim cache ═══');
+  let cFilesData = [];
+  try {
+    const cacheDir = '/home/web_user/.cache/nim/user_r';
+    const entries = window.FS.readdir(cacheDir);
+    // cpp backend writes .cpp, c backend writes .c
+    const cFiles = entries.filter(f => f.endsWith('.nim.c') || f.endsWith('.nim.cpp')).sort();
+    logInfo(`[nim] found ${cFiles.length} .c files in ${cacheDir}`);
+    if (cFiles.length === 0) {
+      throw new Error('no .c files found in nim cache');
+    }
+    let nimbaseContent = '';
+    try {
+      const r = await fetch('/static/nim/nimbase.h');
+      nimbaseContent = await r.text();
+      logInfo(`[nim] loaded nimbase.h (${nimbaseContent.length} chars)`);
+    } catch (e) {
+      logStderr('[nim] failed to fetch nimbase.h: ' + e.message);
+    }
+    for (let idx = 0; idx < cFiles.length; idx++) {
+      const f = cFiles[idx];
+      const c = window.FS.readFile(cacheDir + '/' + f, { encoding: 'utf8' });
+      logInfo(`  + ${f}  (${c.length} chars)`);
+      // The .cpp files use `#include "nimbase.h"` for the C path and may
+      // include other nim headers. Strip the nimbase include (we inline
+      // it below) and the boilerplate.
+      const cleaned = c
+        .split('\n')
+        .filter(line => !/^#include\s+["<](?:\/lib\/)?nimbase\.h[">]\s*$/.test(line))
+        .filter(line => !/^#define NIM_INTBITS/.test(line))
+        .filter(line => !/^#define NIM_EmulateOverflowChecks/.test(line))
+        .filter(line => !/^#undef (LANGUAGE_C|MIPSEB|MIPSEL|PPC|R3000|R4000|i386|linux|mips|near|far|powerpc|unix)\s*$/.test(line))
+        .join('\n')
+        // WASI crt1.o calls main with signature (i32,i32)->i32 i.e. main(argc, argv).
+        // Nim's C backend emits a 3-arg main(argc, args, env). Rewrite to the 2-arg
+        // form crt1.o expects and declare env as a NULL local (a browser has no
+        // process environment). Without this the linked module fails wasm validation
+        // ("not enough arguments on the stack for call").
+        .replace(/int main\(int (\w+), char\*\* (\w+), char\*\* (\w+)\) \{/, 'int main(int $1, char** $2) {\n\tchar** $3 = (char**)0;');
+      // Inline nimbase.h into EVERY TU. Each .cpp file has its own `struct
+      // Exception { ... }` etc. — across separate TUs, re-declaring the
+      // same types is fine (types have no external linkage). Inlining only
+      // into w0.cpp would leave w1..wN with undefined NI/NIM_* types.
+      // CRITICAL: the defines go BEFORE nimbase.h because nimbase's
+      // `typedef NI32 NI;` (and friends) is wrapped in `#ifdef NIM_INTBITS`.
+      // We compile as C (not C++) so we just need the C runtime headers
+      // for things nim's C runtime uses: signal.h for signal()/raise(),
+      // string.h for memcpy. The wasi C sysroot has these. We DON'T
+      // include <setjmp.h> because wasi libc has no C setjmp.h, and
+      // nimbase.h doesn't pull it in either. nim's C backend just uses
+      // `jmp_buf` without including it (works on glibc; breaks on wasi
+      // unless we shim it).
+      const header = '/* Combined header */\n#define NIM_INTBITS 32\n#define NIM_EmulateOverflowChecks\n#include <signal.h>\n#include <string.h>\n/* wasi signal.h does NOT define SIG_IGN/SIG_DFL/signal() (WASI has no signals). */\n/* Nim runtime uses signal() to install SEGV/ILL handlers. We shim */\n/* signal() and define the SIG_* constants. */\ntypedef void (*__sighandler_t)(int);\n#ifndef SIG_IGN\n#define SIG_IGN ((__sighandler_t)1)\n#endif\n#ifndef SIG_DFL\n#define SIG_DFL ((__sighandler_t)0)\n#endif\n#ifndef SIG_ERR\n#define SIG_ERR ((__sighandler_t)-1)\n#endif\nstatic __sighandler_t signal(int sig, __sighandler_t handler) { (void)sig; (void)handler; return SIG_DFL; }\n/* wasi libc declares raise() in signal.h but does NOT implement it */\n/* (WASI has no signals). the Nim system module calls raise() in its */\n/* signal handling path. Provide a weak no-op so every TU may define it without */\n/* duplicate-symbol errors at link time. */\n__attribute__((weak)) int raise(int sig) { (void)sig; return 0; }\ntypedef long int __jmp_buf[8];\ntypedef struct { __jmp_buf __jmpbuf; int __mask_was_saved; } __jmp_buf_tag;\ntypedef __jmp_buf_tag jmp_buf[1];\nextern int setjmp(jmp_buf __env) __attribute__((__nothrow__));\n_Noreturn void longjmp(jmp_buf __env, int __val) __attribute__((__nothrow__));\n' + nimbaseContent + '\n';
+      cFilesData.push({
+        input: 'w' + idx + '.c',  // .c/.cpp doesn't matter; clang uses the code
+        code: header + '/* ===== ' + f + ' ===== */\n' + cleaned + '\n',
+      });
+    }
+    logOk(`[nim] prepared ${cFilesData.length} TUs for clang`);
+  } catch (e) {
+    logStderr('[nim] could not collect .c files: ' + (e.message || e));
+    setStatus('nim compile failed', 'err');
+    btn.disabled = false;
+    return;
+  }
+
+  logStep('═══ STEP 2: Compile C → wasm (via clang.js) ═══');
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  let lastWriteAt = 0;
+  console.log = function(...args) {
+    origLog.apply(console, args);
+    const text = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const stripped = text.replace(/\x1b\[[0-9;]*m/g, '');
+    if (stripped.trim()) stdoutChunks.push(stripped);
+    lastWriteAt = Date.now();
+  };
+  console.error = function(...args) {
+    origErr.apply(console, args);
+    const text = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const stripped = text.replace(/\x1b\[[0-9;]*m/g, '');
+    if (stripped.trim()) stderrChunks.push(stripped);
+    lastWriteAt = Date.now();
+  };
+
+  function waitForQuiet(quietMs = 1500, maxMs = 180000) {
+    const start = Date.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        const now = Date.now();
+        if (now - start > maxMs) return resolve();
+        if (lastWriteAt > 0 && now - lastWriteAt >= quietMs) return resolve();
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+  }
+
+  let clangRc = 0;
+  let buildOk = false;
+  try {
+    const result = await window.clangModule.compileEachLink(cFilesData, 'app.wasm');
+    await waitForQuiet();
+    logInfo('[clang] result: ' + JSON.stringify(result));
+    buildOk = !!(result && result.ok);
+  } catch (e) {
+    logStderr('[clang] failed: ' + (e.name||'?') + ' errno=' + (e.errno||'?') + ' msg=' + (e.message||'?'));
+    if (e.stack) logStderr(e.stack.slice(0, 500));
+    clangRc = -1;
+  }
+  console.log = origLog;
+  console.error = origErr;
+  const dt2 = ((performance.now() - tStart) / 1000).toFixed(2);
+  logInfo(`[clang] run completed in ${dt2}s`);
+
+  if (stdoutChunks.length) {
+    for (const chunk of stdoutChunks) {
+      chunk.split('\n').forEach(l => l && logStdout(l));
+    }
+  }
+  if (stderrChunks.length) {
+    for (const chunk of stderrChunks) {
+      chunk.split('\n').forEach(l => l && logStderr(l));
+    }
+  }
+
+  const total = ((performance.now() - tStart) / 1000).toFixed(2);
+  if (clangRc !== 0) {
+    setStatus('clang failed in ' + total + 's', 'err');
+  } else {
+    setStatus(`done in ${total}s`, 'ok');
+  }
+  btn.disabled = false;
+  if (buildOk) $('btnRunOnly').disabled = false;
+});
+
+// ── Run Only ──────────────────────────────────────────────────────────────
+// Re-run the app.wasm that the last build left in the worker's memfs. No Nim,
+// no clang, no link — just instantiate the cached module on a fresh memory and
+// run its _start again. Enabled only after a successful build; editing the
+// source disables it so you never silently re-run stale output.
+const btnRunOnly = $('btnRunOnly');
+codeEl.addEventListener('input', () => { btnRunOnly.disabled = true; });
+
+btnRunOnly.addEventListener('click', async () => {
+  btnRunOnly.disabled = true;
+  btn.disabled = true;
+  setStatus('running…', 'busy');
+  const tStart = performance.now();
+  logStep('═══ Run Only: executing cached app.wasm (no rebuild) ═══');
+
+  const outChunks = [], errChunks = [];
+  const origLog = console.log, origErr = console.error;
+  let lastWriteAt = 0;
+  const grab = (a) => a.map(x => typeof x === 'string' ? x : JSON.stringify(x))
+                       .join(' ').replace(/\x1b\[[0-9;]*m/g, '');
+  console.log = function (...a) { origLog.apply(console, a);
+    const t = grab(a); if (t.trim()) outChunks.push(t); lastWriteAt = Date.now(); };
+  console.error = function (...a) { origErr.apply(console, a);
+    const t = grab(a); if (t.trim()) errChunks.push(t); lastWriteAt = Date.now(); };
+
+  const waitForQuiet = (quietMs = 1200, maxMs = 60000) => new Promise((res) => {
+    const start = Date.now();
+    (function tick() {
+      const now = Date.now();
+      if (now - start > maxMs) return res();
+      if (lastWriteAt > 0 && now - lastWriteAt >= quietMs) return res();
+      setTimeout(tick, 150);
+    })();
+  });
+
+  let ok = false;
+  try {
+    const result = await window.clangModule.runExisting('app.wasm');
+    await waitForQuiet();
+    ok = !!(result && result.ok);
+    if (result && result.error) logStderr('[run] ' + result.error);
+  } catch (e) {
+    logStderr('[run] failed: ' + (e.message || e));
+  }
+  console.log = origLog;
+  console.error = origErr;
+
+  outChunks.forEach(c => c.split('\n').forEach(l => l && logStdout(l)));
+  errChunks.forEach(c => c.split('\n').forEach(l => l && logStderr(l)));
+
+  const total = ((performance.now() - tStart) / 1000).toFixed(2);
+  setStatus(ok ? `ran in ${total}s` : `run finished in ${total}s`, ok ? 'ok' : 'idle');
+  btn.disabled = false;
+  btnRunOnly.disabled = false;
+});
+</script>
+</body>
+</html>
