@@ -23,7 +23,7 @@ program output
 
 ## Live demo
 
-**[Open the demo →](https://ysm270oa9ksu.space.minimax.io/)**
+**[Open the demo →](https://benagastov.github.io/Nim-WASM-Compiler/)**
 
 Click **Build & Run** to watch your Nim code compile to wasm in the browser.
 After a successful build, **Run Only** re-executes the cached `app.wasm`
