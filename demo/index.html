@@ -37,7 +37,6 @@
   It compiles your Nim code to C, then <code>clang.js</code> (compiled to wasm)
   turns each C file into a wasm object and links them into a final wasm, which runs.
   Click <b>Build &amp; Run</b> to try it.
-  &middot; <a href="/">home</a> &middot; <a href="/nim">show nim compiler</a>
 </div>
 
 <div class="row">
@@ -76,7 +75,7 @@ echo "5! = ", factorial(5)
   <b>Payload:</b> ~70 MB total, lazy-loaded.
 </div>
 
-<script src="/static/nim/nim-bundle.js?v=33"></script>
+<script src="static/nim/nim-bundle.js?v=33"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const codeEl = $('code');
@@ -119,9 +118,9 @@ tick();
   await new Promise(r => setTimeout(r, 200));
   setStatus('loading clang.js…', 'busy');
   logInfo('[init] nim ready, loading clang.js…');
-  const clangModule = await import('/static/clang/clang.js?v=37');
+  const clangModule = await import('./static/clang/clang.js?v=37');
   window.clangModule = clangModule;
-  const CLANG_DIST = new URL('/static/clang', window.location.href).href.replace(/\/$/, '');
+  const CLANG_DIST = new URL('static/clang', window.location.href).href.replace(/\/$/, '');
   await clangModule.init({ path: CLANG_DIST });
   setStatus('ready — click Build & Run', 'ok');
   btn.disabled = false;
@@ -180,7 +179,7 @@ btn.addEventListener('click', async () => {
     }
     let nimbaseContent = '';
     try {
-      const r = await fetch('/static/nim/nimbase.h');
+      const r = await fetch('static/nim/nimbase.h');
       nimbaseContent = await r.text();
       logInfo(`[nim] loaded nimbase.h (${nimbaseContent.length} chars)`);
     } catch (e) {
